@@ -45,6 +45,9 @@ class PluginExporter(mobase.IPluginTool):
     def version(self) -> mobase.VersionInfo:
         return mobase.VersionInfo(0, 0, 7, mobase.ReleaseType.PRE_ALPHA)
 
+    def tooltip(self) -> str:
+        return "Lists existing MO2 backups and allows annotation"
+    
     # Settings
     def isActive(self) -> str:
         return self._organizer.managedGame().feature(mobase.GamePlugins)
@@ -62,8 +65,7 @@ class PluginExporter(mobase.IPluginTool):
     def displayName(self) -> str:
         return "Kodex of Kyler/Plugin Exporter"
 
-    def tooltip(self) -> str:
-        return "Exports Plugin List as CSV with Names and Flags"
+   
 
     def icon(self):
         if self._isMo2Updated:
