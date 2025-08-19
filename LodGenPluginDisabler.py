@@ -102,69 +102,81 @@ class LodGenPluginDisabler(mobase.IPluginTool):
         dyndolod_btn = msgBox.addButton("DynDOLOD", QMessageBox.ButtonRole.ActionRole)
         both_btn = msgBox.addButton("ENABLE Both", QMessageBox.ButtonRole.ActionRole)
 
-        def disable_texgen_plugins():
-            plugins = self._organizer.pluginSetting(self.name(), "texgen_plugins").split(",")
+        def disable_plugins(plugins_type: str):
+            plugins = self._organizer.pluginSetting(self.name(), f"{plugins_type}").split(",")
             not_found = []
-            for plugin in plugins:
-                plugin_name = plugin.strip()
-                if plugin_name in self._pluginList.pluginNames():
-                    self._pluginList.setState(plugin_name, mobase.PluginState.INACTIVE)
+            # loop through plugins.txt manually - Bethesda Plugin Manager prevents using the API calls..
+            plugins_txt_path = Path(self._organizer.profilePath()) / "plugins.txt"
+            if plugins_txt_path.exists():
+                plugins_to_disable = [p.strip() for p in plugins]
+                found_plugins = []
+                lines = []
+                with plugins_txt_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        orig_line = line.rstrip('\n')
+                        line_stripped = orig_line.lstrip('*').strip()
+                        if line_stripped in plugins_to_disable:
+                            qDebug(f"Found plugin to disable: {line_stripped}")
+                            found_plugins.append(line_stripped)
+                            # Remove '*' to disable - keep the line in the same location it was.
+                            lines.append(line_stripped)
+                        else:
+                            lines.append(orig_line)
+                # Write back the modified plugins.txt if not found is empty
+                not_found = [p for p in plugins_to_disable if p not in found_plugins]
+                if not_found:
+                    warning_msg = "The following plugins were not found:\n\n" + "\n".join(not_found) + "\n\nIt is recommended you figure out what is going on before continuing.\n Perhaps a plugin name changed?\n\n ===For your safety, all plugins found will be re-enabled.==="
+                    QMessageBox.warning(None, "Plugin(s) Not Found", warning_msg,)
                 else:
-                    not_found.append(plugin_name)
-            if not_found:
-                warning_msg = "The following plugins were not found:\n\n" + "\n".join(not_found) + "\n\nIt is recommended you figure out what is going on before continuing.\n Perhaps a plugin name changed?\n\n ===For your safety, all plugins found will be re-enabled.==="
-                QMessageBox.warning(None, "Plugin(s) Not Found", warning_msg,)
+                    with plugins_txt_path.open("w", encoding="utf-8") as f:
+                        for l in lines:
+                            f.write(l + "\n")
+                    QMessageBox.information(None, "Success", "The following plugins were sucessfully disabled: \n\n" + "\n".join(plugins))
+            self._organizer.refresh()
+          
 
-                #Re-enable all plugins that were disabled
-                for plugin in plugins:
-                    self._pluginList.setState(plugin.strip(), mobase.PluginState.ACTIVE)
-
-            if not not_found:
-                QMessageBox.information(None, "Success", "The following plugins were sucessfully disabled: \n\n" + "\n".join(plugins))
-
-        def disable_dyndolod_plugins():
-            plugins = self._organizer.pluginSetting(self.name(), "dyndolod_plugins").split(",")
-            not_found = []
-            for plugin in plugins:
-                plugin_name = plugin.strip()
-                if plugin_name in self._pluginList.pluginNames():
-                    self._pluginList.setState(plugin_name, mobase.PluginState.INACTIVE)
+        def enable_plugins(plugins_type: str):
+            plugins = self._organizer.pluginSetting(self.name(), plugins_type).split(",")
+            # loop through plugins.txt manually - Bethesda Plugin Manager prevents using the API calls..
+            plugins_txt_path = Path(self._organizer.profilePath()) / "plugins.txt"
+            if plugins_txt_path.exists():
+                plugins_to_enable = [p.strip() for p in plugins]
+                found_plugins = []
+                lines = []
+                with plugins_txt_path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        orig_line = line.rstrip('\n')
+                        line_stripped = orig_line.lstrip('*').strip()
+                        if line_stripped in plugins_to_enable:
+                            qDebug(f"Found plugin to enable: {line_stripped}")
+                            found_plugins.append(line_stripped)
+                            # Add '*' to enable - keep the line in the same location it was.
+                            lines.append(f"*{line_stripped}")
+                        else:
+                            lines.append(orig_line)
+                # Write back the modified plugins.txt if not found is empty
+                not_found = [p for p in plugins_to_enable if p not in found_plugins]
+                if not_found:
+                    warning_msg = "The following plugins were not found:\n\n" + "\n".join(not_found) + "\n\nIt is recommended you figure out what is going on before continuing.\n Perhaps a plugin name changed?\n\n ===For your safety, all plugins found will be re-enabled.==="
+                    QMessageBox.warning(None, "Plugin(s) Not Found", warning_msg,)
                 else:
-                    not_found.append(plugin_name)
-            if not_found:
-                warning_msg = "The following plugins were not found:\n\n" + "\n".join(not_found) + "\n\nIt is recommended you figure out what is going on before continuing.\n Perhaps a plugin name changed?\n\n ===For your safety, all plugins found will be re-enabled.==="
-                QMessageBox.warning(None, "Plugin(s) Not Found", warning_msg,)
+                    with plugins_txt_path.open("w", encoding="utf-8") as f:
+                        for l in lines:
+                            f.write(l + "\n")
 
-                #Re-enable all plugins that were disabled
-                for plugin in plugins:
-                    self._pluginList.setState(plugin.strip(), mobase.PluginState.ACTIVE)
-            if not not_found:
-                QMessageBox.information(None, "Success", "The following plugins were sucessfully disabled: \n\n" + "\n".join(plugins))
-
-
-        def enable_texgen_plugins():
-            plugins = self._organizer.pluginSetting(self.name(), "texgen_plugins").split(",")
-            for plugin in plugins:
-                self._pluginList.setState(plugin.strip(), mobase.PluginState.ACTIVE)
-
-            
-
-        def enable_dyndolod_plugins():
-            plugins = self._organizer.pluginSetting(self.name(), "dyndolod_plugins").split(",")
-            for plugin in plugins:
-                self._pluginList.setState(plugin.strip(), mobase.PluginState.ACTIVE)
-                
         def enable_both_plugins():
-            enable_texgen_plugins()
-            enable_dyndolod_plugins()
+            enable_plugins("texgen_plugins")
+            enable_plugins("dyndolod_plugins")
             QMessageBox.information(None, "Success", "All plugins were re-enabled.")
+            self._organizer.refresh()
 
 
-        texgen_btn.clicked.connect(disable_texgen_plugins)
-        dyndolod_btn.clicked.connect(disable_dyndolod_plugins)
+
+        texgen_btn.clicked.connect(lambda: disable_plugins("texgen_plugins"))
+        dyndolod_btn.clicked.connect(lambda: disable_plugins("dyndolod_plugins"))
         both_btn.clicked.connect(enable_both_plugins)
         msgBox.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        ret = msgBox.exec()
+        msgBox.exec()
 
 # Tell Mod Organizer to initialize the plugin
 def createPlugin() -> mobase.IPlugin:
