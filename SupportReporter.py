@@ -1,3 +1,9 @@
+
+import mobase
+from typing import List
+
+#from .BackupCompare import BackupCompare
+#from .SupportReporter import SupportReporter
 import mobase
 import re
 from typing import List
@@ -5,10 +11,14 @@ import csv
 import os
 from PyQt6.QtWidgets import QMessageBox
 from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import qDebug, qInfo
 import hashlib
 import site
 import xml.etree.ElementTree as ET
 import subprocess
+import glob
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices
 
 site.addsitedir(os.path.join(os.path.dirname(__file__), "lib"))
 from .lib import wmi
@@ -83,8 +93,32 @@ class SupportReporter(mobase.IPluginTool):
         output_name = "support_output.html"
         output_path = self._organizer.profilePath()
         output_location = output_path + "/" + output_name
-        
-        
+        managed_game = self._organizer.managedGame().gameName()
+        recent_crash_logs = []
+        if managed_game == "Skyrim Special Edition":
+            # Get users my_documents Path
+            try:
+                # Windows API Coming in clutch.
+                import ctypes.wintypes
+                CSIDL_PERSONAL = 5 
+                SHGFP_TYPE_CURRENT = 0
+                buf = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
+                ctypes.windll.shell32.SHGetFolderPathW(None, CSIDL_PERSONAL, None, SHGFP_TYPE_CURRENT, buf)
+                my_documents = buf.value
+            except Exception:
+                # User is probably using linux
+                my_documents = "N/A"
+            if my_documents != "N/A":
+                crash_log_dir = os.path.join(my_documents, "My Games", "Skyrim Special Edition", "SKSE")
+                # Grab the last 3 most recent crash-*.log files
+                recent_crash_logs = sorted(
+                    glob.glob(os.path.join(crash_log_dir, "crash-*.log")),
+                    key=os.path.getmtime,
+                    reverse=True
+                )[:3]
+                for log in recent_crash_logs:
+                    qDebug(f"Found crash log: {log}")
+
         # Get All Mods by Priority
         all_mods = self._modList.allModsByProfilePriority()
         all_plugins = self._pluginList.pluginNames()
@@ -97,9 +131,10 @@ class SupportReporter(mobase.IPluginTool):
             # 2 = Bitwise for ACTIVE
             mod_is_enabled = bool((self._modList.state(mod_name) & mobase.ModState.ACTIVE))
             mod_priority = self._modList.priority(mod_name)
-
+            qDebug(f"mod url for {mod_name}: {mod.nexusId()} {managed_game}")
             modlist_details[mod_name] = {
                 "name": mod_name,
+                "nexus_url": f"https://www.nexusmods.com/skyrimspecialedition/mods/{mod.nexusId()}" if managed_game == "Skyrim Special Edition" and mod.nexusId() > 0 else "",
                 "version": mod_version,
                 "enabled": mod_is_enabled,
                 "priority": mod_priority,
@@ -112,6 +147,7 @@ class SupportReporter(mobase.IPluginTool):
             # Collect plugin paths first, then batch stat/read to minimize IO overhead
             plugin_paths = []
             for plugin in mod_plugins:
+                plugin
                 plugin_path = os.path.join(mod.absolutePath(), plugin)
                 plugin_paths.append((plugin, plugin_path))
 
@@ -296,36 +332,22 @@ class SupportReporter(mobase.IPluginTool):
         if ram:
             # Report RAM in GB
             hardware_info["RAM"] = sum(int(ram_module.Capacity) for ram_module in ram) / (1024 ** 3) 
-            
-        # # Write out a CSV reporting all mods and their plugin hashes (raw data only):
-        # outputLocation = self._organizer.profilePath() + "/JoJ_Gold.csv"
-        # with open(outputLocation, "w", newline="", encoding="utf-8") as csvfile:
-        #     writer = csv.writer(csvfile)
-        #     writer.writerow([
-        #     "Mod Name",
-        #     "Mod Version",
-        #     "Is Enabled",
-        #     "Priority",
-        #     "Custom Mod",
-        #     "Plugin Hashes"
-        #     ])
-        #     for mod_name, details in modDetails.items():
-        #         # Format plugin hashes as plugin1:hash;plugin2:hash;...
-        #         plugin_hashes = details.get("plugin_hashes", {})
-        #         plugin_hashes_str = ";".join(
-        #             f"{plugin}:{hash_val}" for plugin, hash_val in plugin_hashes.items()
-        #         )
-        #         row = [
-        #             details["name"],
-        #             details["version"],
-        #             details["enabled"],
-        #             details["priority"],
-        #             details.get("custom_mod", ""),
-        #             plugin_hashes_str
-        #         ]
-        #         writer.writerow(row)
-        #    qInfo(f"===JoJ Golden Written.===")
 
+        page_file_get_size = c.Win32_PageFileUsage()
+        #page_file_get_drive = c.Win32_PageFile()
+        # Windows deprecated the only way to get the drive. That sucks.
+        if page_file_get_size:
+            page_File_size = sum(int(page.AllocatedBaseSize) for page in page_file_get_size)
+            qDebug(f"Page File Size: {page_File_size / (1024 ** 3)} GB")
+            hardware_info["Page File Size"] = page_File_size / (1024)
+        
+        import shutil
+
+        # Get the total disk space and free disk space
+        total, used, free = shutil.disk_usage(self._organizer.profilePath())
+        hardware_info["Total Disk Space"] = total / (1024 ** 3)  # Convert to GB
+        hardware_info["Used Disk Space"] = used / (1024 ** 3)    # Convert to GB
+        hardware_info["Free Disk Space"] = free / (1024 ** 3)    # Convert to GB
         # Generate a web page that displays the table and enables sorting the table by clicking the headers.
         html_output_location = output_location
         with open(html_output_location, "w", newline="", encoding="utf-8") as htmlfile:
@@ -343,197 +365,242 @@ class SupportReporter(mobase.IPluginTool):
             
             # If you're this deep in the code and you see this...I'm sorry - Honestly, I have no idea how to make this clean while also being portable.
             # But hey, it works!
+            def brighten_color(hex_color, factor=1.3):
+                """Brighten a hex color by a given factor (default 1.3)."""
+                from PyQt6.QtGui import QColor
+                color = QColor(hex_color)
+                r = min(int(color.red() * factor), 255)
+                g = min(int(color.green() * factor), 255)
+                b = min(int(color.blue() * factor), 255)
+                return "#{:02x}{:02x}{:02x}".format(r, g, b)
+
+            bright_report_color = brighten_color(report_color)
+
+            # Use DataTables.js for fast client-side sorting, searching, and pagination
             htmlfile.write("""<html>
-        <head>
-        <title>Mod Discrepancies</title>
-        <style>
-        body {{
-        background: #181818;
-        color: #e0e0e0;
-        font-family: 'Segoe UI', Arial, sans-serif;
-        margin: 0;
-        padding: 0;
-        }}
-        .header-container {{
-        background: #222;
-        padding: 32px 0 16px 0;
-        text-align: center;
-        border-bottom: 2px solid {report_color};
-        }}
-        .ascii-art {{
-        font-family: 'Courier New', monospace;
-        font-size: 18px;
-        color: {report_color};
-        line-height: 1.1;
-        margin-bottom: 8px;
-        white-space: pre;
-        }}
-        .main-title {{
-        font-size: 2em;
-        font-weight: bold;
-        color: #e0e0e0;
-        margin-bottom: 8px;
-        letter-spacing: 2px;
-        }}
-        .subtitle {{
-        font-size: 1.1em;
-        color: #cccccc;
-        margin-bottom: 16px;
-        }}
-        .hardware-info-container {{
-        background: #232323;
-        margin: 32px auto 0 auto;
-        width: 60%;
-        border-radius: 12px;
-        box-shadow: 0 0 8px #111;
-        padding: 24px 32px;
-        }}
-        .hardware-title {{
-        font-size: 1.3em;
-        font-weight: bold;
-        color: {report_color};
-        margin-bottom: 12px;
-        letter-spacing: 1px;
-        }}
-        .hardware-list {{
-        list-style: none;
-        padding: 0;
-        margin: 0;
-        }}
-        .hardware-list li {{
-        padding: 8px 0;
-        border-bottom: 1px solid #333;
-        font-size: 1.05em;
-        }}
-        .hardware-list li:last-child {{
-        border-bottom: none;
-        }}
-        .hardware-label {{
-        font-weight: bold;
-        color: #e0e0e0;
-        margin-right: 8px;
-        }}
-        table {{
-        border-collapse: collapse;
-        width: 95%;
-        margin: 32px auto 32px auto;
-        background: #222;
-        color: #e0e0e0;
-        box-shadow: 0 0 12px #111;
-        }}
-        th, td {{
-        border: 1px solid #444;
-        padding: 8px 12px;
-        text-align: left;
-        }}
-        th {{
-        cursor: pointer;
-        background: #333;
-        color: {report_color};
-        transition: background 0.2s;
-        }}
-        th:hover {{
-        background: #444;
-        }}
-        tr:nth-child(even) {{
-        background: #242424;
-        }}
-        tr:nth-child(odd) {{
-        background: #222;
-        }}
-        tr:hover {{
-        background: #333;
-        }}
-        .discrepancy-current {{
-        color: #ff3333;
-        font-weight: bold;
-        }}
-        .separator-row {{
-        background: {report_color} !important;
-        color: #ffffff !important;
-        font-weight: bold;
-        }}
-        /* Reduce width for certain columns */
-        .mod-version-col {{ width: 120px; }}
-        .enabled-col {{ width: 80px; }}
-        .priority-col {{ width: 80px; }}
-        .custom-mod-col {{ width: 1%; white-space: nowrap; }}
-        </style>
-        <script>
-        function sortTableByColumn(tableId, colIndex) {{
-        var table = document.getElementById(tableId);
-        var rows = Array.from(table.rows).slice(1);
-        var asc = table.getAttribute("data-sort-dir") !== "desc";
-        rows.sort(function(a, b) {{
-        var valA = a.cells[colIndex].innerText;
-        var valB = b.cells[colIndex].innerText;
-        if (!isNaN(valA) && !isNaN(valB)) {{
-            valA = Number(valA);
-            valB = Number(valB);
-        }}
-        return asc ? (valA > valB ? 1 : valA < valB ? -1 : 0) : (valA < valB ? 1 : valA > valB ? -1 : 0);
-        }});
-        for (var i = 0; i < rows.length; i++) {{
-        table.tBodies[0].appendChild(rows[i]);
-        }}
-        table.setAttribute("data-sort-dir", asc ? "desc" : "asc");
-        }}
-        </script>
-        </head>
-        <body>
-        <div class="header-container">
-            <div class="ascii-art">
-    ██╗░░██╗░█████╗░██████╗░███████╗██╗░░██╗
-    ██║░██╔╝██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
-    █████═╝░██║░░██║██║░░██║█████╗░░░╚███╔╝░
-    ██╔═██╗░██║░░██║██║░░██║██╔══╝░░░██╔██╗░
-    ██║░╚██╗╚█████╔╝██████╔╝███████╗██╔╝╚██╗
-    ╚═╝░░╚═╝░╚════╝░╚═════╝░╚══════╝╚═╝░░╚═╝
-            </div>
-            <div class="main-title">{report_title}</div>
-            <div class="subtitle">Comprehensive Mod List Analysis</div>
-        </div>
-        <div class="hardware-info-container">
-            <div class="hardware-title">User Hardware Information</div>
-            <ul class="hardware-list">
-                <li><span class="hardware-label">GPU:</span> {gpu}</li>
-                <li><span class="hardware-label">VRAM:</span> {vram} GB</li>
-                <li><span class="hardware-label">CPU:</span> {cpu}</li>
-                <li><span class="hardware-label">RAM:</span> {ram} GB</li>
-            </ul>
-        </div>
-        <table id="modTable" border="1" data-sort-dir="asc">
-    """.format(
-        report_color=report_color,
-        report_title=report_title,
-        gpu=hardware_info.get("GPU", "Unknown"),
-        vram=hardware_info.get("VRAM", "Unknown"),
-        cpu=hardware_info.get("CPU", "Unknown"),
-        ram=round(hardware_info.get("RAM", 0), 2) if isinstance(hardware_info.get("RAM", 0), (int, float)) else hardware_info.get("RAM", "Unknown")
-    ))
+                    <head>
+                    <title>Mod Discrepancies</title>
+                    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css"/>
+                    <style>
+                    body {{ 
+                    background: #181818;
+                    color: #e0e0e0;
+                    font-family: 'Segoe UI', Arial, sans-serif;
+                    margin: 0;
+                    padding: 0;
+                    }}
+                    .header-container {{ 
+                    background: #222;
+                    padding: 32px 0 16px 0;
+                    text-align: center;
+                    border-bottom: 2px solid {bright_report_color};
+                    }}
+                    .ascii-art {{ 
+                    font-family: 'Courier New', monospace;
+                    font-size: 18px;
+                    color: {bright_report_color};
+                    line-height: 1.1;
+                    margin-bottom: 8px;
+                    white-space: pre;
+                    }}
+                    .main-title {{ 
+                    font-size: 2em;
+                    font-weight: bold;
+                    color: #e0e0e0;
+                    margin-bottom: 8px;
+                    letter-spacing: 2px;
+                    }}
+                    .subtitle {{ 
+                    font-size: 1.1em;
+                    color: #cccccc;
+                    margin-bottom: 16px;
+                    }}
+                    .hardware-info-container {{ 
+                    background: #232323;
+                    margin: 32px auto 0 auto;
+                    width: 60%;
+                    border-radius: 12px;
+                    box-shadow: 0 0 8px #111;
+                    padding: 24px 32px;
+                    }}
+                    .hardware-title {{ 
+                    font-size: 1.3em;
+                    font-weight: bold;
+                    color: {bright_report_color};
+                    margin-bottom: 12px;
+                    letter-spacing: 1px;
+                    }}
+                    .hardware-list {{ 
+                    list-style: none;
+                    padding: 0;
+                    margin: 0;
+                    }}
+                    .hardware-list li {{ 
+                    padding: 8px 0;
+                    border-bottom: 1px solid #333;
+                    font-size: 1.05em;
+                    }}
+                    .hardware-list li:last-child {{ 
+                    border-bottom: none;
+                    }}
+                    .hardware-label {{ 
+                    font-weight: bold;
+                    color: #e0e0e0;
+                    margin-right: 8px;
+                    }}
+                    .table-container {{
+                    width: 95%;
+                    margin: 32px auto 32px auto;
+                    background: #222;
+                    box-shadow: 0 0 12px #111;
+                    border-radius: 8px;
+                    overflow-x: auto;
+                    }}
+                    table.dataTable {{ 
+                    border-collapse: collapse;
+                    width: 100%;
+                    background: #222;
+                    color: #e0e0e0;
+                    }}
+                    th, td {{ 
+                    border: 1px solid #444;
+                    padding: 8px 12px;
+                    text-align: left;
+                    }}
+                    th {{ 
+                    background: #333;
+                    color: {bright_report_color};
+                    transition: background 0.2s;
+                    }}
+                    tr:nth-child(even) {{ 
+                    background: #242424;
+                    }}
+                    tr:nth-child(odd) {{ 
+                    background: #222;
+                    }}
+                    tr:hover {{ 
+                    background: #333;
+                    }}
+                    .discrepancy-current {{ 
+                    color: #ff3333;
+                    font-weight: bold;
+                    }}
+                    .separator-row {{ 
+                    background: {bright_report_color} !important;
+                    color: #ffffff !important;
+                    font-weight: bold;
+                    }}
+                    .mod-version-col {{ width: 120px; }}
+                    .enabled-col {{ width: 80px; }}
+                    .priority-col {{ width: 80px; }}
+                    .custom-mod-col {{ width: 1%; white-space: nowrap; }}
+                    a {{ 
+                    color: {bright_report_color};
+                    text-decoration: underline;
+                    transition: color 0.2s, text-decoration 0.2s;
+                    }}
+                    a:hover {{ 
+                    color: #ff3333;
+                    text-decoration: none;
+                    }}
+                    </style>
+                    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+                    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+                    <script>
+                    $(document).ready(function() {{ 
+                        $('#modTable').DataTable({{ 
+                            "pageLength": -1,
+                            "lengthMenu": [ [100, 250, 500, 1000, -1], [100, 250, 500, 1000, "All"] ],
+                            "order": [],
+                            "stateSave": true,
+                            "scrollX": true,
+                            "deferRender": true
+                        }});
+                    }});
+                    </script>
+                    </head>
+                    <body>
+                    <div class="header-container">
+                        <div class="ascii-art">
+                ██╗░░██╗░█████╗░██████╗░███████╗██╗░░██╗
+                ██║░██╔╝██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝
+                █████═╝░██║░░██║██║░░██║█████╗░░░╚███╔╝░
+                ██╔═██╗░██║░░██║██║░░██║██╔══╝░░░██╔██╗░
+                ██║░╚██╗╚█████╔╝██████╔╝███████╗██╔╝╚██╗
+                ╚═╝░░╚═╝░╚════╝░╚═════╝░╚══════╝╚═╝░░╚═╝
+                        </div>
+                        <div class="main-title">{report_title}</div>
+                        <div class="subtitle">Comprehensive Mod List Analysis</div>
+                    </div>
+                    <div class="hardware-info-container">
+                        <div class="hardware-title">User Hardware Information</div>
+                        <ul class="hardware-list">
+                            <li><span class="hardware-label">GPU:</span> {gpu}</li>
+                            <li><span class="hardware-label">VRAM:</span> {vram} GB</li>
+                            <li><span class="hardware-label">CPU:</span> {cpu}</li>
+                            <li><span class="hardware-label">RAM:</span> {ram} GB</li>
+                            <li><span class="hardware-label">Page File Size:</span> {page_file_size} GB</li>
+                            <li><span class="hardware-label">Disk Space Usage:</span> {used_disk_space} / {total_disk_space} GB ({free_disk_space} GB free)</li>
+                        </ul>
+                    </div>
+                    """.format(
+                    bright_report_color=bright_report_color,
+                    report_title=report_title,
+                    gpu=hardware_info.get("GPU", "Unknown"),
+                    vram=hardware_info.get("VRAM", "Unknown"),
+                    cpu=hardware_info.get("CPU", "Unknown"),
+                    ram=round(hardware_info.get("RAM", 0), 2) if isinstance(hardware_info.get("RAM", 0), (int, float)) else hardware_info.get("RAM", "Unknown"),
+                    page_file_size=round(hardware_info.get("Page File Size", 0), 2) if isinstance(hardware_info.get("Page File Size", 0), (int, float)) else hardware_info.get("Page File Size", "Unknown"),
+                    used_disk_space=round(hardware_info.get("Used Disk Space", 0), 2) if isinstance(hardware_info.get("Used Disk Space", 0), (int, float)) else hardware_info.get("Used Disk Space", "Unknown"),
+                    total_disk_space=round(hardware_info.get("Total Disk Space", 0), 2) if isinstance(hardware_info.get("Total Disk Space", 0), (int, float)) else hardware_info.get("Total Disk Space", "Unknown"),
+                    free_disk_space=round(hardware_info.get("Free Disk Space", 0), 2) if isinstance(hardware_info.get("Free Disk Space", 0), (int, float)) else hardware_info.get("Free Disk Space", "Unknown"),
+                ))
             col_offset = 4
-            # Only show the custom mod column if the user has custom mods
+            if recent_crash_logs:
+                htmlfile.write(f"""
+                <div class="hardware-info-container crash-logs-container" style="margin-top:32px;">
+                    <div class="hardware-title" style="margin-bottom:12px;">Recent Crash Logs</div>
+                    <ul class="hardware-list" style="margin-bottom:0;">
+                """)
+                for log_path in recent_crash_logs:
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
+                            log_content = log_file.read()
+                    except Exception as e:
+                        log_content = f"Could not read log: {e}"
+                    log_name = os.path.basename(log_path)
+                    htmlfile.write(f"""
+                    <li style="padding:0;">
+                        <details style="margin-bottom:12px;">
+                            <summary style="font-weight:bold;color:{bright_report_color};cursor:pointer;">{log_name}</summary>
+                            <pre style="background:#232323;color:#e0e0e0;padding:12px;border-radius:8px;max-height:400px;overflow:auto;font-size:0.95em;">{log_content}</pre>
+                        </details>
+                    </li>
+                    """)
+                htmlfile.write("</ul></div>") 
+            # Wrap the table in a container to ensure header and body alignment
+            htmlfile.write('<div class="table-container">\n')
             header_row = (
-                '<tr>\n'
-                '<th onclick="sortTableByColumn(\'modTable\', 0)">Mod Name</th>\n'
-                '<th class="mod-version-col" onclick="sortTableByColumn(\'modTable\', 1)">Mod Version</th>\n'
-                '<th class="enabled-col" onclick="sortTableByColumn(\'modTable\', 2)">Is Enabled</th>\n'
-                '<th class="priority-col" onclick="sortTableByColumn(\'modTable\', 3)">Priority</th>\n'
+                '<table id="modTable" class="display" style="width:100%">\n'
+                '<thead><tr>\n'
+                '<th>Mod Name</th>\n'
+                '<th class="mod-version-col">Mod Version</th>\n'
+                '<th class="enabled-col">Is Enabled</th>\n'
+                '<th class="priority-col">Priority</th>\n'
             )
             if has_custom_mod:
-                header_row += f'<th class="custom-mod-col" onclick="sortTableByColumn(\'modTable\', {col_offset})">Custom Mod?</th>\n'
+                header_row += f'<th class="custom-mod-col">Custom Mod?</th>\n'
                 col_offset += 1
             header_row += (
-                f'<th onclick="sortTableByColumn(\'modTable\', {col_offset})">Version?</th>'
-                f'<th onclick="sortTableByColumn(\'modTable\', {col_offset+1})">Enabled?</th>'
-                f'<th onclick="sortTableByColumn(\'modTable\', {col_offset+2})">Priority?</th>\n'
+                f'<th>Version?</th>'
+                f'<th>Enabled?</th>'
+                f'<th>Priority?</th>\n'
             )
             if has_plugin_hash_discrepancy:
-                header_row += f'<th onclick="sortTableByColumn(\'modTable\', {col_offset+3})">Plugin Hash Discrepancies</th>\n'
-            header_row += "</tr>\n"
+                header_row += f'<th>Plugin Hash Discrepancies</th>\n'
+            header_row += "</tr></thead>\n<tbody>\n"
             htmlfile.write(header_row)
 
-            # Highlight current version or state of a mod if it differs from the original
             def highlight_current(text):
                 if text and text.startswith("Current: "):
                     parts = text.split(",", 1)
@@ -545,16 +612,18 @@ class SupportReporter(mobase.IPluginTool):
                     return text or ""
                 return text or ""
 
-            # Iterate through the modlist and provide it in HTML format
             for mod_name, details in modlist_details.items():
                 is_separator = mod_name.endswith("_separator")
                 row_class = "separator-row" if is_separator else ""
-                display_name = (
-                    mod_name[:-10] + " - Separator"
-                    if is_separator
-                    else details["name"]
-                )
-                
+                if is_separator:
+                    display_name = mod_name[:-10] + " - Separator"
+                else:
+                    nexus_url = details.get("nexus_url", "")
+                    if nexus_url:
+                        display_name = f'<a href="{nexus_url}" target="_blank">{details["name"]}</a>'
+                    else:
+                        display_name = details["name"]
+
                 row_html = (
                     f'<tr{" class=\""+row_class+"\"" if row_class else ""}>\n'
                     f'  <td>{display_name}</td>\n'
@@ -582,7 +651,8 @@ class SupportReporter(mobase.IPluginTool):
                 row_html += "</tr>\n"
                 htmlfile.write(row_html)
             htmlfile.write("""
-            </table>
+            </tbody></table>
+            </div>
             <div style="width:100%;text-align:center;padding:24px 0 12px 0;color:#888;font-size:1em;">
                 <hr style="margin-bottom:12px;border:0;border-top:1px solid #444;">
                 Kodex Author: Kyler45, <a href="https://github.com/KylerNyhagen">GitHub</a>
@@ -590,31 +660,33 @@ class SupportReporter(mobase.IPluginTool):
             </div>
             </body></html>
             """)
-        # Open dialog box where options are "open file" and "copy to clipboard", copy to clipboard will copy the file to their clipboard
 
         msgBox = QMessageBox()
         msgBox.setText(
             "Support Output is complete!\nYou can find your export at:\n\n"
             + html_output_location
         )
-        msgBox.setInformativeText("You can also copy the file path to your clipboard.")
+        msgBox.setInformativeText("Open the file path below and provide this to your friendly support team!")
         msgBox.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
         msgBox.button(QMessageBox.StandardButton.Ok).setText("Open File")
-        msgBox.button(QMessageBox.StandardButton.Cancel).setText("Copy to Clipboard")
-        msgBox.button(QMessageBox.StandardButton.Cancel).clicked.connect(lambda: copy_to_clipboard(html_output_location))
+        msgBox.button(QMessageBox.StandardButton.Cancel).setText("Open Folder")
+        msgBox.button(QMessageBox.StandardButton.Cancel).clicked.connect(lambda: open_folder(html_output_location))
         msgBox.button(QMessageBox.StandardButton.Ok).clicked.connect(lambda: open_file(html_output_location))
 
         msgBox.exec()
 
-def copy_to_clipboard(text: str):
-    # Use subprocess to avoid showing powershell terminal when running
+def open_folder(text: str):
+    # Open the html_output_location folder, highlight the file selected
+    import sys
     
-    command = f'powershell Set-Clipboard -LiteralPath "{text}"'
-    subprocess.run(command, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    # Make the file the selected file in windows explorer
+    # Ensure the path is quoted correctly and explorer /select is used
+    command = f'explorer /select,"{os.path.normpath(text)}"'
+    subprocess.run(command, shell=True)
+
+
 
 def open_file(file_path: str):
-    from PyQt6.QtCore import QUrl
-    from PyQt6.QtGui import QDesktopServices
     # Opens the specified file using the default application
     QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
 
